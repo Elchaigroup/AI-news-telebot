@@ -24,7 +24,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "2"))
-NEWS_INTERVAL = int(os.getenv("NEWS_INTERVAL", "300"))  # 5 minutes default (300 seconds)
+NEWS_INTERVAL = int(os.getenv("NEWS_INTERVAL", "60"))  # 5 minutes default (300 seconds)
 MAX_RETRIES = 3
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
