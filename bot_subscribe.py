@@ -8,6 +8,7 @@ import feedparser
 import hashlib
 import logging
 import random
+from openai import OpenAI
 
 # Setup logging
 logging.basicConfig(
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "2"))
 NEWS_INTERVAL = int(os.getenv("NEWS_INTERVAL", "60"))  # 5 minutes default (300 seconds)
 MAX_RETRIES = 3
@@ -30,14 +32,17 @@ MAX_RETRIES = 3
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# English messages
+# Initialize OpenAI client
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Italian messages
 WELCOME = (
-    "👋 Welcome! You're now subscribed to AI News Bot.\n\n"
-    "🤖 You'll receive the latest AI news updates regularly.\n"
-    "📱 Commands: /stop to unsubscribe, /status to check subscription, /news for latest update"
+    "👋 Benvenuto! Ora sei iscritto al Bot Notizie AI.\n\n"
+    "🤖 Riceverai regolarmente gli ultimi aggiornamenti sulle notizie AI.\n"
+    "📱 Comandi: /stop per annullare l'iscrizione, /status per controllare l'iscrizione, /news per l'ultimo aggiornamento"
 )
-GOODBYE = "👋 You've unsubscribed. To return: /start"
-STATUS = "📬 You're subscribed! You'll receive AI news updates here."
+GOODBYE = "👋 Ti sei disiscritto. Per tornare: /start"
+STATUS = "📬 Sei iscritto! Riceverai qui gli aggiornamenti sulle notizie AI."
 
 # Enhanced AI News RSS feeds with more sources for 24/7 coverage
 AI_NEWS_FEEDS = [
@@ -56,6 +61,81 @@ AI_NEWS_FEEDS = [
     {"url": "https://spectrum.ieee.org/rss/topic/artificial-intelligence", "name": "IEEE Spectrum AI"},
     {"url": "https://www.zdnet.com/topic/artificial-intelligence/rss.xml", "name": "ZDNet AI"},
 ]
+
+def translate_to_italian(text):
+    """Translate text to Italian using OpenAI API"""
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a professional translator. Translate the following English text to Italian. Maintain the same tone and style. Only return the Italian translation, nothing else."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            temperature=0.3,
+            max_tokens=1000
+        )
+        
+        translated_text = response.choices[0].message.content.strip()
+        logger.info("Successfully translated text to Italian")
+        return translated_text
+        
+    except Exception as e:
+        logger.warning(f"Failed to translate text to Italian: {e}")
+        return None
+
+def translate_news_item(news_item):
+    """Translate a news item to Italian, returns original if translation fails"""
+    try:
+        # Create a combined text for translation to save API calls
+        combined_text = f"TITLE: {news_item['title']}\n\nSUMMARY: {news_item['summary'] if news_item['summary'] else 'No summary'}"
+        
+        translated = translate_to_italian(combined_text)
+        
+        if translated:
+            # Split the translated text back into title and summary
+            lines = translated.split('\n')
+            
+            # Find title and summary in translated text
+            title_italian = news_item['title']  # Default to original
+            summary_italian = news_item['summary']  # Default to original
+            
+            for i, line in enumerate(lines):
+                if line.startswith('TITOLO:') or line.startswith('TITLE:'):
+                    title_italian = line.replace('TITOLO:', '').replace('TITLE:', '').strip()
+                elif line.startswith('RIASSUNTO:') or line.startswith('SOMMARIO:') or line.startswith('SUMMARY:'):
+                    # Get all remaining lines as summary
+                    summary_parts = []
+                    for j in range(i, len(lines)):
+                        clean_line = lines[j].replace('RIASSUNTO:', '').replace('SOMMARIO:', '').replace('SUMMARY:', '').strip()
+                        if clean_line:
+                            summary_parts.append(clean_line)
+                    summary_italian = ' '.join(summary_parts)
+                    break
+            
+            # If we couldn't parse properly, try a simpler approach
+            if title_italian == news_item['title'] and len(lines) >= 2:
+                title_italian = lines[0].strip()
+                summary_italian = ' '.join(lines[1:]).strip()
+            
+            return {
+                **news_item,
+                'title': title_italian,
+                'summary': summary_italian,
+                'translated': True
+            }
+        
+    except Exception as e:
+        logger.error(f"Error in translate_news_item: {e}")
+    
+    # Return original if translation failed
+    logger.info("Using original English text due to translation failure")
+    return {**news_item, 'translated': False}
 
 def safe_request(func, *args, max_retries=MAX_RETRIES, **kwargs):
     """Wrapper for safe API requests with retry logic"""
@@ -225,17 +305,21 @@ def fetch_ai_news():
 
 def format_news_message(news_item):
     """Format news item for Telegram with emojis and better formatting"""
-    message = f"🤖 **AI News Alert**\n\n"
+    message = f"🤖 **Notizie AI**\n\n"
     message += f"**{news_item['title']}**\n\n"
     
     if news_item['summary']:
         message += f"📝 {news_item['summary']}\n\n"
     
-    message += f"🔗 [Read Full Article]({news_item['link']})\n"
-    message += f"📰 Source: {news_item['source']}\n"
+    message += f"🔗 [Leggi l'articolo completo]({news_item['link']})\n"
+    message += f"📰 Fonte: {news_item['source']}\n"
     
     if news_item.get('published'):
         message += f"⏰ {news_item['published']}"
+    
+    # Add translation notice if it wasn't translated
+    if not news_item.get('translated', True):
+        message += "\n\n_[Articolo originale in inglese]_"
     
     return message
 
@@ -260,7 +344,10 @@ def broadcast_news():
         failed_sends = 0
         
         for news_item in news_items:
-            message = format_news_message(news_item)
+            # Translate the news item
+            translated_item = translate_news_item(news_item)
+            message = format_news_message(translated_item)
+            
             item_successful = 0
             item_failed = 0
             
@@ -288,7 +375,7 @@ def broadcast_news():
             # Mark as sent regardless of delivery success (to avoid resending)
             mark_news_as_sent(
                 news_item['hash'], 
-                news_item['title'], 
+                news_item['title'],  # Store original English title
                 news_item['source'],
                 news_item['link']
             )
@@ -372,10 +459,13 @@ def handle_update(u):
             news_items = fetch_ai_news()
             if news_items:
                 for news_item in news_items[:1]:  # Send just the latest
-                    message = format_news_message(news_item)
+                    # Translate and send
+                    translated_item = translate_news_item(news_item)
+                    message = format_news_message(translated_item)
                     send("sendMessage", chat_id=chat_id, text=message, parse_mode="Markdown")
             else:
-                send("sendMessage", chat_id=chat_id, text="🤖 No new AI news available right now. Check back soon!")
+                no_news_msg = "🤖 Nessuna nuova notizia AI disponibile al momento. Ricontrolla più tardi!"
+                send("sendMessage", chat_id=chat_id, text=no_news_msg)
         
     except Exception as e:
         logger.error(f"Error handling update: {e}")
@@ -423,7 +513,17 @@ def bot_polling():
 
 def main():
     """Main function - starts both threads and keeps them running"""
-    logger.info("🤖 Starting AI News Telegram Bot...")
+    logger.info("🤖 Starting AI News Telegram Bot with Italian translation...")
+    
+    # Test OpenAI connection
+    try:
+        test_translation = translate_to_italian("Hello world")
+        if test_translation:
+            logger.info(f"✅ OpenAI API connected successfully. Test: 'Hello world' -> '{test_translation}'")
+        else:
+            logger.warning("⚠️ OpenAI API test failed, will send news in English if translation fails")
+    except Exception as e:
+        logger.warning(f"⚠️ OpenAI API initialization warning: {e}")
     
     # Start news worker in background thread
     news_thread = threading.Thread(target=news_worker, daemon=False, name="NewsWorker")
@@ -456,7 +556,7 @@ def main():
         logger.critical(f"💥 Critical error in main: {e}")
 
 if __name__ == "__main__":
-    required_vars = ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "TELEGRAM_TOKEN")
+    required_vars = ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "TELEGRAM_TOKEN", "OPENAI_API_KEY")
     for var in required_vars:
         if not os.environ.get(var):
             raise SystemExit(f"❌ Missing env var: {var}")
